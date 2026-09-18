@@ -1,81 +1,88 @@
+import { useEffect, useMemo } from "react";
 import "./styles.css";
+import { FilterPanel } from "./components/FilterPanel";
+import { RecordEditor } from "./components/RecordEditor";
+import { RecordList } from "./components/RecordList";
+import { StatsBar } from "./components/StatsBar";
+import { validateForSign } from "./domain";
+import { computeStats, matchRecord } from "./filterStats";
+import { createDraft, saveUI } from "./storage";
+import type { FilterState } from "./types";
+import { useFittingStore, useUI } from "./useStore";
 
 const project = {
-  "id": "hxwl-01",
-  "port": 5101,
-  "title": "听力验配记录",
-  "subtitle": "门店听力师的验配档案与听力曲线工作台",
-  "stack": "React + Vite + TypeScript + CSS",
-  "theme": [
-    "#155e75",
-    "#22c55e",
-    "#f97316"
-  ],
-  "domain": "听力验配",
-  "users": [
-    "听力师",
-    "门店主管",
-    "复诊助理"
-  ],
-  "metrics": [
-    "左耳PTA",
-    "右耳PTA",
-    "言语识别率",
-    "复诊天数"
-  ],
-  "filters": [
-    "初配",
-    "复调",
-    "儿童",
-    "老人"
-  ],
-  "fields": [
-    "气导",
-    "骨导",
-    "言语识别率",
-    "助听器型号",
-    "增益调整",
-    "用户反馈"
-  ],
-  "records": [
-    [
-      "Liu-024",
-      "双耳高频下降",
-      "初配",
-      "RIC机型，2kHz后增益提高4dB"
-    ],
-    [
-      "Chen-118",
-      "单侧传导性损失",
-      "复调",
-      "低频压缩略降，反馈啸叫已消失"
-    ],
-    [
-      "Zhao-077",
-      "老人语频区下降",
-      "复诊",
-      "言语识别率从64%提升到76%"
-    ]
-  ]
+  id: "hxwl-01",
+  port: 5101,
+  title: "听力验配记录",
+  subtitle:
+    "门店听力师的验配档案与听力曲线工作台：录入 → 规则校验 → 签发冻结 → 复调修订，全流程本地落盘。",
+  stack: "React + Vite + TypeScript + localStorage",
 };
 
-const statusColors = ["status-ok", "status-watch", "status-danger"];
-
-function MetricCard({ label, value, index }: { label: string; value: string; index: number }) {
-  return (
-    <article className="metric-card">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <i className={statusColors[index % statusColors.length]} />
-    </article>
-  );
-}
-
 function App() {
-  const values = project.metrics.map((metric: string, index: number) => {
-    const base = [84, 12, 31, 7][index % 4];
-    return String(base + index * 3);
-  });
+  const store = useFittingStore();
+  const ui = useUI();
+  const filters = ui.filters;
+
+  const filteredRecords = useMemo(
+    () => store.records.filter((r) => matchRecord(r, filters)),
+    [store.records, filters],
+  );
+
+  const filteredChains = useMemo(() => {
+    const map = new Map<string, typeof filteredRecords>();
+    for (const r of filteredRecords) {
+      if (!map.has(r.chainId)) map.set(r.chainId, []);
+      map.get(r.chainId)!.push(r);
+    }
+    return Array.from(map.values())
+      .map((chain) =>
+        chain.slice().sort((a, b) => b.revision - a.revision || b.updatedAt - a.updatedAt),
+      )
+      .sort((a, b) => b[0].updatedAt - a[0].updatedAt);
+  }, [filteredRecords]);
+
+  const stats = useMemo(
+    () => computeStats(filteredRecords, (r) => validateForSign(r.data).length === 0),
+    [filteredRecords],
+  );
+
+  const selected = store.records.find((r) => r.revisionId === ui.selectedRevisionId) ?? null;
+  const selectedChain = selected
+    ? store.records
+        .filter((r) => r.chainId === selected.chainId)
+        .sort((a, b) => b.revision - a.revision || b.updatedAt - a.updatedAt)
+    : [];
+
+  // 当前选中版本失效（被删除 / 跨标签合并）时自动回落到首条筛选结果
+  useEffect(() => {
+    if (selected) return;
+    const fallback = filteredChains[0]?.[0]?.revisionId ?? null;
+    if (fallback !== ui.selectedRevisionId) {
+      saveUI({ ...ui, selectedRevisionId: fallback });
+    }
+  }, [selected, filteredChains, ui]);
+
+  function updateFilters(next: FilterState) {
+    saveUI({ ...ui, filters: next });
+  }
+
+  function selectRevision(revisionId: string) {
+    saveUI({ ...ui, selectedRevisionId: revisionId });
+  }
+
+  function handleCreate() {
+    const draft = createDraft();
+    saveUI({ ...ui, selectedRevisionId: draft.revisionId });
+  }
+
+  function handleDeleted() {
+    const remainingChains = filteredChains.filter(
+      (c) => !c.every((r) => r.revisionId === ui.selectedRevisionId),
+    );
+    const fallback = remainingChains[0]?.[0]?.revisionId ?? null;
+    saveUI({ ...ui, selectedRevisionId: fallback });
+  }
 
   return (
     <main className="app-shell">
@@ -86,70 +93,40 @@ function App() {
           <p className="subtitle">{project.subtitle}</p>
         </div>
         <div className="stack-card">
-          <span>技术栈</span>
+          <span>技术栈 / 持久化</span>
           <strong>{project.stack}</strong>
+          <span className="hero-note">刷新不丢数据 · 多标签冲突时已签发历史优先</span>
         </div>
       </section>
 
-      <section className="metrics-grid">
-        {project.metrics.map((metric: string, index: number) => (
-          <MetricCard key={metric} label={metric} value={values[index]} index={index} />
-        ))}
-      </section>
+      <StatsBar stats={stats} />
 
       <section className="workspace">
-        <aside className="panel narrow">
-          <h2>角色</h2>
-          <div className="chips">
-            {project.users.map((user: string) => (
-              <span key={user}>{user}</span>
-            ))}
-          </div>
-          <h2>筛选</h2>
-          <div className="chips muted">
-            {project.filters.map((filter: string) => (
-              <button key={filter}>{filter}</button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="panel">
-          <div className="section-heading">
-            <div>
-              <p>{project.domain}</p>
-              <h2>记录字段</h2>
-            </div>
-            <button className="primary-action">新增记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
-      </section>
-
-      <section className="records panel">
-        <div className="section-heading">
-          <div>
-            <p>示例数据</p>
-            <h2>近期记录</h2>
-          </div>
-          <button>导出摘要</button>
-        </div>
-        <div className="record-list">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")} className="record-card">
-              <div className="record-index">{String(index + 1).padStart(2, "0")}</div>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
-          ))}
+        <FilterPanel filters={filters} onChange={updateFilters} />
+        <div className="main-column">
+          {selected ? (
+            <RecordEditor
+              key={selected.revisionId}
+              record={selected}
+              chain={selectedChain}
+              onSelectRevision={selectRevision}
+              onRecordDeleted={handleDeleted}
+            />
+          ) : (
+            <section className="panel editor empty-editor">
+              <h2>暂无记录</h2>
+              <p>新增一份验配记录，或调整左侧筛选条件。</p>
+              <button className="primary-action" onClick={handleCreate}>
+                + 新增记录
+              </button>
+            </section>
+          )}
+          <RecordList
+            chains={filteredChains}
+            selectedRevisionId={ui.selectedRevisionId}
+            onSelect={selectRevision}
+            onCreate={handleCreate}
+          />
         </div>
       </section>
     </main>
